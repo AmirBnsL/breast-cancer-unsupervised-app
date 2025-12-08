@@ -1,0 +1,4 @@
+Average Non-Black Pixel Value (RGB):
+R: 182.533053
+G: 139.450010
+B: 175.009637
