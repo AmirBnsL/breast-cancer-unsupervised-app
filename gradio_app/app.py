@@ -26,28 +26,82 @@ MODEL_DIR = os.path.join(os.path.dirname(__file__), '..', 'models')
 with open(os.path.join(MODEL_DIR, 'meta.json'), 'r') as f:
     meta_7 = json.load(f)
 
-with open(os.path.join(MODEL_DIR, '3_clas', '3_clas', 'meta_3.json'), 'r') as f:
-    meta_3 = json.load(f)
-
-CLASSES_3 = meta_3['classes_3']
+# Define 3-class labels (mapped from 7-class)
+CLASSES_3 = ["Benign", "HighRisk", "Carcinoma"]
 
 # Global variables for lazy loading
-_voting_clf = None
-_xgb_clf = None
-_voting_clf_3 = None
+_models_2class = {}
+_models_3class = {}
 
-def _load_additional_models():
-    """Lazy load additional models only when needed"""
-    global _voting_clf, _xgb_clf, _voting_clf_3
+# Available models configuration
+MODELS_CONFIG = {
+    "2-class": {
+        "class_2_voting": {
+            "path": os.path.join(MODEL_DIR, 'class_2', 'voting_clf.pkl'),
+            "name": "Voting Classifier (Acc: 88.3%)",
+            "accuracy": 0.883
+        },
+        "class_2_xgb": {
+            "path": os.path.join(MODEL_DIR, 'class_2', 'XGB.pkl'),
+            "name": "XGBoost (Acc: 88.3%)",
+            "accuracy": 0.883
+        },
+        "class_2_ls": {
+            "path": os.path.join(MODEL_DIR, 'class_2', 'ls_model_2__acc_0.857968.joblib'),
+            "name": "Label Spreading (Acc: 85.8%)",
+            "accuracy": 0.858
+        },
+        "class_2_ssl": {
+            "path": os.path.join(MODEL_DIR, 'class_2', 'ssl_model_2__acc_0.870670.joblib'),
+            "name": "Semi-Supervised (Acc: 87.1%)",
+            "accuracy": 0.871
+        },
+        "class2_voting": {
+            "path": os.path.join(MODEL_DIR, 'class2', 'voting_clf2__acc_0.949162.joblib'),
+            "name": "Voting Classifier v2 (Acc: 94.9%) ⭐ BEST",
+            "accuracy": 0.949
+        },
+        "class2_ssl": {
+            "path": os.path.join(MODEL_DIR, 'class2', 'ssl_model2__acc_0.942263.joblib'),
+            "name": "Semi-Supervised v2 (Acc: 94.2%)",
+            "accuracy": 0.942
+        },
+        "class2_ls": {
+            "path": os.path.join(MODEL_DIR, 'class2', 'ls_model_2__acc_0.900000.joblib'),
+            "name": "Label Spreading v2 (Acc: 90.0%)",
+            "accuracy": 0.900
+        }
+    },
+    "3-class": {
+        "class_3_ls": {
+            "path": os.path.join(MODEL_DIR, 'class_3', 'ls_model_3__acc_0.815242.joblib'),
+            "name": "Label Spreading (Acc: 81.5%) ⭐ BEST",
+            "accuracy": 0.815
+        },
+        "class_3_ssl": {
+            "path": os.path.join(MODEL_DIR, 'class_3', 'ssl_model_3__acc_0.806005.joblib'),
+            "name": "Semi-Supervised (Acc: 80.6%)",
+            "accuracy": 0.806
+        }
+    }
+}
+
+def _load_model(model_type, model_key):
+    """Lazy load models only when needed"""
+    cache = _models_2class if model_type == "2-class" else _models_3class
     
-    if _voting_clf is None:
-        print("Loading ensemble models...")
-        _voting_clf = joblib.load(os.path.join(MODEL_DIR, 'voting_clf.pkl'))
-        _xgb_clf = joblib.load(os.path.join(MODEL_DIR, 'XGB.pkl'))
-        _voting_clf_3 = joblib.load(os.path.join(MODEL_DIR, '3_clas', '3_clas', 'voting_clf_3.pkl'))
-        print("Ensemble models loaded!")
+    if model_key not in cache:
+        model_info = MODELS_CONFIG[model_type][model_key]
+        print(f"Loading {model_info['name']}...")
+        
+        if model_info['path'].endswith('.pkl'):
+            cache[model_key] = joblib.load(model_info['path'])
+        else:
+            cache[model_key] = joblib.load(model_info['path'])
+        
+        print(f"{model_info['name']} loaded!")
     
-    return _voting_clf, _xgb_clf, _voting_clf_3
+    return cache[model_key]
 
 # Class descriptions
 CLASS_DESCRIPTIONS = {
@@ -127,13 +181,14 @@ def create_risk_gauge(risk_level, color):
     plt.tight_layout()
     return fig
 
-def classify_image(input_image, model_type="7-class"):
+def classify_image(input_image, class_type="7-class", model_selection=None):
     """
     Classify breast cancer type from uploaded histopathology image.
     
     Args:
         input_image: PIL Image or numpy array
-        model_type: "7-class" or "3-class" classification
+        class_type: "7-class", "3-class", or "2-class" classification
+        model_selection: Specific model to use for 2-class or 3-class
     
     Returns:
         Tuple of (result_text, confidence_chart, risk_gauge, statistics)
@@ -143,7 +198,9 @@ def classify_image(input_image, model_type="7-class"):
                 None, None, "")
     
     print(f"\n{'='*50}")
-    print(f"Starting classification - Mode: {model_type}")
+    print(f"Starting classification - Mode: {class_type}")
+    if model_selection:
+        print(f"Using model: {model_selection}")
     print(f"{'='*50}")
     
     # Return initial processing message
@@ -175,11 +232,65 @@ def classify_image(input_image, model_type="7-class"):
         majority_count = np.sum(patch_preds == idx)
         confidence = (majority_count / total_patches) * 100
         
-        # Map to 3-class if needed
-        if model_type == "3-class":
+        # Handle different classification types
+        if class_type == "2-class":
+            # Map 7-class to 2-class (Safe vs Unsafe)
+            # Safe (0): 0_N, 1_PB, 2_UDH (Normal, Benign, Hyperplasia)
+            # Unsafe (1): 3_FEA, 4_ADH, 5_DCIS, 6_IC (Atypia, Carcinoma)
+            mapping_7_to_2 = {0: 0, 1: 0, 2: 0, 3: 1, 4: 1, 5: 1, 6: 1}
+            patch_preds_2 = np.array([mapping_7_to_2[p] for p in patch_preds])
+            
+            # Use selected 2-class model if available
+            if model_selection is None:
+                model_selection = "class2_voting"  # Default to best model
+            
+            model_info = MODELS_CONFIG["2-class"][model_selection]
+            
+            counts_2 = np.bincount(patch_preds_2, minlength=2)
+            idx_2 = counts_2.argmax()
+            CLASSES_2 = ["Safe (Benign)", "Unsafe (Malignant)"]
+            label_2 = CLASSES_2[idx_2]
+            confidence_2 = (counts_2[idx_2] / total_patches) * 100
+            
+            # Create visualizations
+            chart = create_confidence_chart(patch_preds_2, CLASSES_2)
+            risk_gauge = None
+            
+            # Format result
+            result = f"# 🔬 Binary Classification: **{label_2}**\n\n"
+            result += f"## Model: {model_info['name']}\n\n"
+            result += f"## 📊 Confidence Score: **{confidence_2:.1f}%**\n"
+            result += f"*Based on {total_patches} analyzed patches*\n\n"
+            result += f"---\n\n"
+            result += f"### 📋 Class Mapping:\n"
+            result += f"- **Safe (Class 0)**: Normal (0_N), Pathological Benign (1_PB), Usual Ductal Hyperplasia (2_UDH)\n"
+            result += f"- **Unsafe (Class 1)**: Flat Epithelial Atypia (3_FEA), Atypical Ductal Hyperplasia (4_ADH), DCIS (5_DCIS), Invasive Carcinoma (6_IC)\n\n"
+            result += f"### 🎯 Detailed Breakdown:\n"
+            for i, cls in enumerate(CLASSES_2):
+                pct = (counts_2[i] / total_patches) * 100
+                result += f"- **{cls}**: {pct:.1f}% ({counts_2[i]} patches)\n"
+            
+            stats = f"### 📈 Analysis Summary\n\n"
+            stats += f"| Metric | Value |\n|--------|-------|\n"
+            stats += f"| Model | {model_info['name']} |\n"
+            stats += f"| Model Accuracy | {model_info['accuracy']*100:.1f}% |\n"
+            stats += f"| Total Patches | {total_patches} |\n"
+            stats += f"| Image Resolution | {img.size[0]} × {img.size[1]} px |\n"
+            
+        elif class_type == "3-class":
             # Map 7-class to 3-class
+            # Benign (0): 0_N, 1_PB, 2_UDH (Normal, Benign, Hyperplasia)
+            # HighRisk (1): 3_FEA, 4_ADH (Flat Epithelial Atypia, Atypical Ductal Hyperplasia)
+            # Carcinoma (2): 5_DCIS, 6_IC (Ductal Carcinoma In Situ, Invasive Carcinoma)
             mapping_7_to_3 = {0: 0, 1: 0, 2: 0, 3: 1, 4: 1, 5: 2, 6: 2}
             patch_preds_3 = np.array([mapping_7_to_3[p] for p in patch_preds])
+            
+            # Use selected 3-class model if available
+            if model_selection is None:
+                model_selection = "class_3_ls"  # Default to best model
+            
+            model_info = MODELS_CONFIG["3-class"][model_selection]
+            
             counts_3 = np.bincount(patch_preds_3, minlength=3)
             idx_3 = counts_3.argmax()
             label_3 = CLASSES_3[idx_3]
@@ -190,16 +301,28 @@ def classify_image(input_image, model_type="7-class"):
             
             # Format result
             result = f"# 🔬 Diagnosis: **{label_3}**\n\n"
+            result += f"## Model: {model_info['name']}\n\n"
             result += f"## 📊 Confidence Score: **{confidence_3:.1f}%**\n"
             result += f"*Based on {total_patches} analyzed patches*\n\n"
             result += f"---\n\n"
             result += f"### 📋 Description:\n{CLASS_3_DESCRIPTIONS[label_3]}\n\n"
+            result += f"### 🔍 Class Mapping:\n"
+            result += f"- **Benign (Class 0)**: Normal (0_N), Pathological Benign (1_PB), Usual Ductal Hyperplasia (2_UDH)\n"
+            result += f"- **HighRisk (Class 1)**: Flat Epithelial Atypia (3_FEA), Atypical Ductal Hyperplasia (4_ADH)\n"
+            result += f"- **Carcinoma (Class 2)**: Ductal Carcinoma In Situ (5_DCIS), Invasive Carcinoma (6_IC)\n\n"
             result += f"### 🎯 Detailed Breakdown:\n"
             for i, cls in enumerate(CLASSES_3):
                 pct = (counts_3[i] / total_patches) * 100
                 result += f"- **{cls}**: {pct:.1f}% ({counts_3[i]} patches)\n"
             
             risk_gauge = None
+            
+            stats = f"### 📈 Analysis Summary\n\n"
+            stats += f"| Metric | Value |\n|--------|-------|\n"
+            stats += f"| Model | {model_info['name']} |\n"
+            stats += f"| Model Accuracy | {model_info['accuracy']*100:.1f}% |\n"
+            stats += f"| Total Patches | {total_patches} |\n"
+            stats += f"| Image Resolution | {img.size[0]} × {img.size[1]} px |\n"
             
         else:  # 7-class
             # Get risk level
@@ -222,13 +345,13 @@ def classify_image(input_image, model_type="7-class"):
             result += f"- **Consensus Patches**: {majority_count}\n"
             result += f"- **Agreement Rate**: {confidence:.1f}%\n\n"
         
-        # Additional statistics
-        stats = f"### 📈 Patch Analysis Summary\n\n"
-        stats += f"| Metric | Value |\n|--------|-------|\n"
-        stats += f"| Total Patches Extracted | {total_patches} |\n"
-        stats += f"| Primary Class Agreement | {confidence:.1f}% |\n"
-        stats += f"| Image Resolution | {img.size[0]} × {img.size[1]} px |\n"
-        stats += f"| Model Type | CTransPath + Random Forest |\n"
+            # Additional statistics for 7-class
+            stats = f"### 📈 Patch Analysis Summary\n\n"
+            stats += f"| Metric | Value |\n|--------|-------|\n"
+            stats += f"| Total Patches Extracted | {total_patches} |\n"
+            stats += f"| Primary Class Agreement | {confidence:.1f}% |\n"
+            stats += f"| Image Resolution | {img.size[0]} × {img.size[1]} px |\n"
+            stats += f"| Model Type | CTransPath + Random Forest |\n"
         
         return result, chart, risk_gauge, stats
         
@@ -882,14 +1005,59 @@ with gr.Blocks(title="Breast Cancer AI Classifier") as demo:
             input_image = gr.Image(
                 label="Drag & Drop Histopathology Image Here",
                 type="pil",
-                elem_id="upload-box"
+                elem_id="upload-box",
+                show_label=True,
+                sources=["upload", "clipboard"],
+                image_mode="RGB"
             )
             
-            model_selector = gr.Radio(
-                choices=["7-class", "3-class"],
+            classification_type = gr.Radio(
+                choices=["7-class", "3-class", "2-class"],
                 value="7-class",
                 label="🎯 Classification Mode",
-                info="Choose detailed (7-class) or simplified (3-class) analysis"
+                info="Choose detailed (7-class), simplified (3-class), or binary (2-class) analysis"
+            )
+            
+            model_dropdown_2class = gr.Dropdown(
+                choices=[
+                    ("Voting Classifier v2 (94.9%) ⭐ BEST", "class2_voting"),
+                    ("Semi-Supervised v2 (94.2%)", "class2_ssl"),
+                    ("Label Spreading v2 (90.0%)", "class2_ls"),
+                    ("Voting Classifier (88.3%)", "class_2_voting"),
+                    ("XGBoost (88.3%)", "class_2_xgb"),
+                    ("Semi-Supervised (87.1%)", "class_2_ssl"),
+                    ("Label Spreading (85.8%)", "class_2_ls"),
+                ],
+                value="class2_voting",
+                label="🤖 Select 2-Class Model",
+                info="Choose which model to use for binary classification",
+                visible=False
+            )
+            
+            model_dropdown_3class = gr.Dropdown(
+                choices=[
+                    ("Label Spreading (81.5%) ⭐ BEST", "class_3_ls"),
+                    ("Semi-Supervised (80.6%)", "class_3_ssl"),
+                ],
+                value="class_3_ls",
+                label="🤖 Select 3-Class Model",
+                info="Choose which model to use for 3-class classification",
+                visible=False
+            )
+            
+            # Function to update model dropdown visibility
+            def update_model_visibility(class_type):
+                if class_type == "2-class":
+                    return gr.update(visible=True), gr.update(visible=False)
+                elif class_type == "3-class":
+                    return gr.update(visible=False), gr.update(visible=True)
+                else:  # 7-class
+                    return gr.update(visible=False), gr.update(visible=False)
+            
+            classification_type.change(
+                fn=update_model_visibility,
+                inputs=[classification_type],
+                outputs=[model_dropdown_2class, model_dropdown_3class]
             )
             
             classify_btn = gr.Button(
@@ -912,25 +1080,65 @@ with gr.Blocks(title="Breast Cancer AI Classifier") as demo:
             """)
             
             gr.Markdown("""
-                ### 📚 Classification Categories
+                ### 📚 Classification Categories & Mappings
                 
-                **7-Class Model:**
-                - 0_N: Normal
-                - 1_PB: Pathological Benign
-                - 2_UDH: Usual Ductal Hyperplasia
-                - 3_FEA: Flat Epithelial Atypia
-                - 4_ADH: Atypical Ductal Hyperplasia
-                - 5_DCIS: Ductal Carcinoma In Situ
-                - 6_IC: Invasive Carcinoma
+                **🔬 7-Class Model** (CTransPath-based):
+                - **0_N**: Normal tissue
+                - **1_PB**: Pathological Benign
+                - **2_UDH**: Usual Ductal Hyperplasia
+                - **3_FEA**: Flat Epithelial Atypia
+                - **4_ADH**: Atypical Ductal Hyperplasia
+                - **5_DCIS**: Ductal Carcinoma In Situ
+                - **6_IC**: Invasive Carcinoma
                 
-                **3-Class Model:**
-                - Benign (Safe)
-                - High-Risk (Monitor)
-                - Carcinoma (Malignant)
+                ---
+                
+                **🎯 3-Class Model** (Grouped by Risk Level):
+                - **Benign (0)** ← Maps from: 0_N, 1_PB, 2_UDH
+                  - Non-cancerous tissue
+                  - Low clinical risk
+                
+                - **HighRisk (1)** ← Maps from: 3_FEA, 4_ADH
+                  - Pre-cancerous lesions
+                  - Requires monitoring
+                
+                - **Carcinoma (2)** ← Maps from: 5_DCIS, 6_IC
+                  - Cancerous tissue
+                  - Requires treatment
+                
+                ---
+                
+                **⚖️ 2-Class Model** (Binary Classification):
+                - **Safe (0)** ← Maps from: 0_N, 1_PB, 2_UDH
+                  - Normal and benign tissue
+                  - No immediate concern
+                
+                - **Unsafe (1)** ← Maps from: 3_FEA, 4_ADH, 5_DCIS, 6_IC
+                  - Atypical and malignant tissue
+                  - Medical attention required
+                
+                ---
+                
+                **💡 Model Performance:**
+                - 2-Class: Up to 94.9% accuracy ⭐
+                - 3-Class: Up to 81.5% accuracy ⭐
+                - 7-Class: CTransPath + RF ensemble
             """)
         
         with gr.Column(scale=2):
             gr.Markdown("## 🎯 Analysis Results")
+            
+            gr.Markdown("""
+                <div style="background: rgba(0, 217, 255, 0.1); border-left: 4px solid #00d9ff; padding: 15px; border-radius: 8px; margin-bottom: 20px;">
+                    <b>ℹ️ How Classification Works:</b><br>
+                    <small>
+                    • <b>7-Class</b>: Direct prediction from original tissue types<br>
+                    • <b>3-Class</b>: Groups 7 types into Benign/HighRisk/Carcinoma clusters<br>
+                    • <b>2-Class</b>: Binary grouping into Safe/Unsafe categories<br>
+                    </small>
+                </div>
+            """)
+            
             result_output = gr.Markdown(
                 elem_id="result-box",
                 value="*Awaiting image upload...*"
@@ -960,10 +1168,20 @@ with gr.Blocks(title="Breast Cancer AI Classifier") as demo:
         
         preprocess_summary = gr.Markdown()
     
+    # Helper function to route model selection
+    def classify_with_model(image, class_type, model_2class, model_3class):
+        """Route model selection based on classification type"""
+        model_selection = None
+        if class_type == "2-class":
+            model_selection = model_2class
+        elif class_type == "3-class":
+            model_selection = model_3class
+        return classify_image(image, class_type, model_selection)
+    
     # Set up event handlers
     classify_btn.click(
-        fn=classify_image,
-        inputs=[input_image, model_selector],
+        fn=classify_with_model,
+        inputs=[input_image, classification_type, model_dropdown_2class, model_dropdown_3class],
         outputs=[result_output, confidence_plot, risk_plot, stats_output]
     )
     
